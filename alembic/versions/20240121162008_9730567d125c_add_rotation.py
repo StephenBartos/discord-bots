@@ -31,7 +31,9 @@ def upgrade():
         batch_op.create_index(
             batch_op.f("ix_rotation_created_at"), ["created_at"], unique=False
         )
-
+    op.execute(
+        "INSERT INTO ROTATION (name, created_at, id) VALUES ('foo', '2023-03-19 19:44:16', '1')"
+    )
     with op.batch_alter_table("queue", schema=None) as batch_op:
         batch_op.add_column(
             sa.Column(
