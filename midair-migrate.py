@@ -179,6 +179,15 @@ def create_dataframes():
 
 
 def create_table_csvs():
+    """
+    copy queue to '/tmp/queue.csv' with (format csv, header);
+    copy queue_region to '/tmp/queue_region.csv' with (format csv, header);
+    copy player to '/tmp/player.csv' with (format csv, header);
+    copy player_region_trueskill to '/tmp/player_region_trueskill.csv' with (format csv, header);
+    copy finished_game to '/tmp/finished_game.csv' with (format csv, header);
+    copy finished_game_player to '/tmp/finished_game_player.csv' with (format csv, header);
+    copy map to '/tmp/map.csv' with (format csv, header);
+    """
     with engine.connect() as con:
         con.execute(text("copy queue to '/tmp/queue.csv' with (format csv, header)"))
         print("Created /tmp/queue.csv")
