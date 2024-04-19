@@ -76,3 +76,4 @@ wcwidth==0.2.13
 websockets==10.2
 wsproto==1.0.0
 yarl==1.9.4
+pandas==2.2.0
