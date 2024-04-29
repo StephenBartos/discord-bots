@@ -137,6 +137,7 @@ def create_dataframes():
     df_player_region_trueskill["rank"] = df_player_region_trueskill[
         "rated_trueskill_mu"
     ] - (3 * df_player_region_trueskill["rated_trueskill_sigma"])
+    df_player_region_trueskill["last_game_finished_at"] = None
     df_player_region_trueskill.rename(
         columns={
             "queue_region_id": "category_id",
