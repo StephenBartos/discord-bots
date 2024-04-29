@@ -1,11 +1,12 @@
 # Misc helper functions
+import asyncio
 import itertools
 import logging
 import math
 import os
 import statistics
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Optional
 
 import discord
 import imgkit
@@ -20,17 +21,18 @@ from discord import (
     Message,
     PartialMessage,
     TextChannel,
+    VoiceChannel,
+    VoiceState,
 )
-from discord.ext import commands
 from discord.ext.commands.context import Context
 from discord.member import Member
 from PIL import Image
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm.session import Session as SQLAlchemySession
 from table2ascii import Alignment, Merge, PresetStyle, table2ascii
-from trueskill import Rating, global_env, rate
+from trueskill import Rating, global_env
 
 import discord_bots.config as config
 from discord_bots.bot import bot
@@ -39,6 +41,7 @@ from discord_bots.models import (
     FinishedGame,
     FinishedGamePlayer,
     InProgressGame,
+    InProgressGameChannel,
     InProgressGamePlayer,
     Map,
     MapVote,
@@ -674,11 +677,16 @@ async def send_message(
     return message
 
 async def print_leaderboard():
-    output = "**Leaderboard**"
+    output = "**Leaderboard**"  # TODO: remove output str, it's not used anymore
     embeds = []
-    embed = discord.Embed(title="Leaderboard", color=discord.Color.blue())
+    embed = discord.Embed(
+        title="Leaderboard",
+        color=discord.Color.blue(),
+        timestamp=discord.utils.utcnow(),
+    )
     embed_footer = f"\nRanks calculated using the formula: {MU_LOWER_UNICODE} - 3*{SIGMA_LOWER_UNICODE}"
     embed_footer += "\n!disableleaderboard to hide yourself from the leaderboard"
+    embed_footer += "\nLast Updated"
     embed.set_footer(text=embed_footer)
     session: SQLAlchemySession
     with Session() as session:
@@ -691,8 +699,25 @@ async def print_leaderboard():
         if len(categories) > 0:
             for i, category in enumerate(categories):
                 output += f"\n_{category.name}_"
+                subquery = (
+                    session.query(FinishedGamePlayer.player_id)
+                    .join(
+                        FinishedGame,
+                        FinishedGame.id == FinishedGamePlayer.finished_game_id,
+                    )
+                    .filter(
+                        FinishedGame.started_at
+                        > (datetime.now(timezone.utc) - timedelta(days=30))
+                    )
+                    .filter(FinishedGame.category_name == category.name)
+                    .group_by(FinishedGamePlayer.player_id)
+                    .having(func.count() >= category.min_games_for_leaderboard)
+                    .subquery()
+                )
                 top_10_pcts: list[PlayerCategoryTrueskill] | None = (
                     session.query(PlayerCategoryTrueskill)
+                    .join(Player, Player.id == PlayerCategoryTrueskill.player_id)
+                    .filter(PlayerCategoryTrueskill.player_id.in_(select(subquery)))
                     .filter(PlayerCategoryTrueskill.category_id == category.id)
                     .order_by(PlayerCategoryTrueskill.rank.desc())
                     .limit(10)
@@ -716,6 +741,16 @@ async def print_leaderboard():
                                 round(pct.sigma, 1),
                             ]
                             cols.append(col)
+                    if category.min_games_for_leaderboard > 0:
+                        cols.append(
+                            [
+                                f"Minimum of {category.min_games_for_leaderboard} {'games' if category.min_games_for_leaderboard > 1 else 'game'} played in the last 30 days",
+                                Merge.LEFT,
+                                Merge.LEFT,
+                                Merge.LEFT,
+                                Merge.LEFT,
+                            ]
+                        )
                     table = table2ascii(
                         header=[
                             category.name,
@@ -725,9 +760,9 @@ async def print_leaderboard():
                             SIGMA_LOWER_UNICODE,
                         ],
                         body=cols,
-                        style=PresetStyle.thin_compact_rounded,
+                        style=PresetStyle.plain,
                         alignments=[
-                            Alignment.DECIMAL,
+                            Alignment.LEFT,
                             Alignment.LEFT,
                             Alignment.DECIMAL,
                             Alignment.DECIMAL,
@@ -748,6 +783,7 @@ async def print_leaderboard():
 
 
     if config.LEADERBOARD_CHANNEL:
+        # TODO: merge with new leaderboard style
         leaderboard_channel = bot.get_channel(config.LEADERBOARD_CHANNEL)
         if leaderboard_channel and isinstance(leaderboard_channel, TextChannel):
             try:
@@ -756,18 +792,11 @@ async def print_leaderboard():
                         leaderboard_channel.last_message_id
                     )
                 if last_message:
-                    embed = Embed(
-                        description=output,
-                        colour=Colour.blue(),
-                        timestamp=discord.utils.utcnow(),
-                    )
-                    embed.set_footer(text="Last updated")
                     await last_message.edit(embeds=embeds)
                     return
             except Exception as e:
-                _log.exception("[print_leaderboard] exception")
-            finally:
-                await leaderboard_channel.send(embeds=embeds)
+                pass
+            await leaderboard_channel.send(embeds=embeds)
 
 
 def code_block(content: str, language: str = "autohotkey") -> str:
@@ -825,3 +854,180 @@ def get_team_name_diff(
         else "> \n** **"  # creates an empty quote
     )
     return team0_diff_str, team1_diff_str
+
+async def move_game_players(
+    game_id: str, interaction: Interaction | None = None, guild: Guild | None = None
+):
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        message: Message | None = None
+        if interaction:
+            message = interaction.message
+            guild = interaction.guild
+        elif guild:
+            message = None
+        else:
+            raise Exception("No Interaction or Guild on _movegameplayers")
+
+        in_progress_game = (
+            session.query(InProgressGame)
+            .filter(InProgressGame.id.startswith(game_id))
+            .first()
+        )
+        if not in_progress_game:
+            if message:
+                await send_message(
+                    message.channel,
+                    embed_description=f"Could not find game: {game_id}",
+                    colour=Colour.red(),
+                )
+                return
+            return
+
+        team0_ipg_players: list[InProgressGamePlayer] = session.query(
+            InProgressGamePlayer
+        ).filter(
+            InProgressGamePlayer.in_progress_game_id == in_progress_game.id,
+            InProgressGamePlayer.team == 0,
+        )
+        team1_ipg_players: list[InProgressGamePlayer] = session.query(
+            InProgressGamePlayer
+        ).filter(
+            InProgressGamePlayer.in_progress_game_id == in_progress_game.id,
+            InProgressGamePlayer.team == 1,
+        )
+        team0_player_ids = set(map(lambda x: x.player_id, team0_ipg_players))
+        team1_player_ids = set(map(lambda x: x.player_id, team1_ipg_players))
+        team0_players: list[Player] = session.query(Player).filter(Player.id.in_(team0_player_ids))  # type: ignore
+        team1_players: list[Player] = session.query(Player).filter(Player.id.in_(team1_player_ids))  # type: ignore
+
+        be_voice_channel: VoiceChannel | None = None
+        ds_voice_channel: VoiceChannel | None = None
+        ipg_channels: list[InProgressGameChannel] | None = (
+            session.query(InProgressGameChannel)
+            .filter(InProgressGameChannel.in_progress_game_id == in_progress_game.id)
+            .all()
+        )
+        for ipg_channel in ipg_channels or []:
+            discord_channel: discord.abc.GuildChannel | None = guild.get_channel(
+                ipg_channel.channel_id
+            )
+            if isinstance(discord_channel, VoiceChannel):
+                # This is suboptimal solution but it's good enough for now. We should keep track of each team's VC in the database
+                if discord_channel.name == in_progress_game.team0_name:
+                    be_voice_channel = discord_channel
+                elif discord_channel.name == in_progress_game.team1_name:
+                    ds_voice_channel = discord_channel
+
+        # TODO: combine for loops into one for all players
+        coroutines = []
+        for player in team0_players:
+            if player.move_enabled and be_voice_channel:
+                member: Member | None = guild.get_member(player.id)
+                if member:
+                    member_voice: VoiceState | None = member.voice
+                    if member_voice and member_voice.channel:
+                        try:
+                            coroutines.append(
+                                member.move_to(
+                                    be_voice_channel,
+                                    reason=f"Game {game_id} started",
+                                )
+                            )
+                        except Exception:
+                            _log.exception(
+                                f"Caught exception moving player to voice channel"
+                            )
+
+        for player in team1_players:
+            if player.move_enabled and ds_voice_channel:
+                member: Member | None = guild.get_member(player.id)
+                if member:
+                    member_voice: VoiceState | None = member.voice
+                    if member_voice and member_voice.channel:
+                        try:
+                            coroutines.append(
+                                member.move_to(
+                                    ds_voice_channel,
+                                    reason=f"Game {game_id} started",
+                                )
+                            )
+                        except Exception:
+                            _log.exception(
+                                f"Caught exception moving player to voice channel"
+                            )
+    # use gather to run the moves concurrently in the event loop
+    # note: a member has to be in a voice channel already for them to be moved, else it throws an exception
+    results = await asyncio.gather(*coroutines, return_exceptions=True)
+    for result in results:
+        # results should be empty unless an exception occured when moving a player
+        if isinstance(result, BaseException):
+            _log.exception("Ignored exception when moving a gameplayer:")
+
+async def move_game_players_lobby(
+    game_id: str, guild: Guild
+):
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        in_progress_game: InProgressGame | None = (
+            session.query(InProgressGame)
+            .filter(InProgressGame.id == game_id)
+            .first()
+        )
+        if not in_progress_game:
+            return
+
+        queue: Queue | None = (
+            session.query(Queue)
+            .filter(Queue.id == in_progress_game.queue_id)
+            .first()
+        )
+        if not queue or not queue.move_enabled:
+            return
+
+        voice_lobby: discord.abc.GuildChannel | None = guild.get_channel(
+                config.VOICE_MOVE_LOBBY
+        )
+        if not isinstance(voice_lobby, VoiceChannel) or not voice_lobby:
+            _log.exception("VOICE_MOVE_LOBBY not found")
+            return
+
+        ipg_channels: list[InProgressGameChannel] | None = (
+                session.query(InProgressGameChannel)
+                .filter(InProgressGameChannel.in_progress_game_id == in_progress_game.id)
+                .all()
+            )
+
+        coroutines = []
+        for ipg_channel in ipg_channels or []:
+            discord_channel: discord.abc.GuildChannel | None = guild.get_channel(
+                ipg_channel.channel_id
+            )
+            if isinstance(discord_channel, VoiceChannel):
+                members: list[Member] = discord_channel.members
+                if members:
+                    for member in members:
+                        try:
+                            coroutines.append(
+                                member.move_to(
+                                    voice_lobby,
+                                    reason=f"Game {short_uuid(game_id)} finished",
+                                )
+                            )
+                        except Exception:
+                            _log.exception(
+                                    f"Caught exception moving player to voice lobby"
+                                )
+
+    results = await asyncio.gather(*coroutines, return_exceptions=True)
+    for result in results:
+        # results should be empty unless an exception occured when moving a player
+        if isinstance(result, BaseException):
+            _log.exception("Ignored exception when moving a gameplayer to lobby:")
+
+def default_sigma_decay_amount() -> float:
+    """
+    The default sigma decay applied to new categories
+    Which causes decay from 0 sigma to default over a year
+    """
+    return config.DEFAULT_TRUESKILL_SIGMA / 365

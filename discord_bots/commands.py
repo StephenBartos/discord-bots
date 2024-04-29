@@ -29,6 +29,7 @@ from discord import (
     Message,
     TextChannel,
     VoiceChannel,
+    VoiceState
 )
 from discord.ext import commands
 from discord.ext.commands.context import Context
@@ -61,6 +62,7 @@ from discord_bots.utils import (
     update_next_map_to_map_after_next,
     upload_stats_screenshot_imgkit_channel,
     win_probability,
+    move_game_players
 )
 
 from .bot import bot
@@ -531,7 +533,7 @@ async def create_game(
             and be_voice_channel
             and ds_voice_channel
         ):
-            await _movegameplayers(short_game_id, None, guild)
+            await move_game_players(short_game_id, None, guild)
             await send_message(
                 channel,
                 embed_description=f"Players moved to voice channels for game {short_game_id}",
@@ -2223,131 +2225,44 @@ async def trueskill(ctx: Context):
     )
 
 
-async def _movegameplayers(game_id: str, ctx: Context = None, guild: Guild = None):
-    session: sqlalchemy.orm.Session
-    with Session() as session:
-        message: Message | None = None
-        if ctx:
-            message = ctx.message
-            guild = ctx.guild
-        elif guild:
-            message = None
-        else:
-            raise Exception("No Context or Guild on _movegameplayers")
-
-        in_progress_game = (
-            session.query(InProgressGame)
-            .filter(InProgressGame.id.startswith(game_id))
-            .first()
-        )
-        if not in_progress_game:
-            if message:
-                await send_message(
-                    message.channel,
-                    embed_description=f"Could not find game: {game_id}",
-                    colour=Colour.red(),
-                )
-                return
-            return
-
-        team0_ipg_players: list[InProgressGamePlayer] = session.query(
-            InProgressGamePlayer
-        ).filter(
-            InProgressGamePlayer.in_progress_game_id == in_progress_game.id,
-            InProgressGamePlayer.team == 0,
-        )
-        team1_ipg_players: list[InProgressGamePlayer] = session.query(
-            InProgressGamePlayer
-        ).filter(
-            InProgressGamePlayer.in_progress_game_id == in_progress_game.id,
-            InProgressGamePlayer.team == 1,
-        )
-        team0_player_ids = set(map(lambda x: x.player_id, team0_ipg_players))
-        team1_player_ids = set(map(lambda x: x.player_id, team1_ipg_players))
-        team0_players: list[Player] = session.query(Player).filter(Player.id.in_(team0_player_ids))  # type: ignore
-        team1_players: list[Player] = session.query(Player).filter(Player.id.in_(team1_player_ids))  # type: ignore
-
-        be_voice_channel: discord.VoiceChannel | None = None
-        ds_voice_channel: discord.VoiceChannel | None = None
-        ipg_channels: list[InProgressGameChannel] | None = (
-            session.query(InProgressGameChannel)
-            .filter(InProgressGameChannel.in_progress_game_id == in_progress_game.id)
-            .all()
-        )
-        for ipg_channel in ipg_channels or []:
-            discord_channel: discord.abc.GuildChannel | None = guild.get_channel(
-                ipg_channel.channel_id
-            )
-            if isinstance(discord_channel, discord.VoiceChannel):
-                # This is suboptimal solution but it's good enough for now. We should keep track of each team's VC in the database
-                if discord_channel.name == in_progress_game.team0_name:
-                    be_voice_channel = discord_channel
-                elif discord_channel.name == in_progress_game.team1_name:
-                    ds_voice_channel = discord_channel
-
-        coroutines = []
-        for player in team0_players:
-            if player.move_enabled and be_voice_channel:
-                member: Member | None = guild.get_member(player.id)
-                if member:
-                    try:
-                        coroutines.append(
-                            member.move_to(
-                                be_voice_channel,
-                                reason=f"Game {game_id} started",
-                            )
-                        )
-                    except Exception:
-                        _log.exception(
-                            f"Caught exception moving player to voice channel"
-                        )
-
-        for player in team1_players:
-            if player.move_enabled and ds_voice_channel:
-                member: Member | None = guild.get_member(player.id)
-                if member:
-                    try:
-                        coroutines.append(
-                            member.move_to(
-                                ds_voice_channel,
-                                reason=f"Game {game_id} started",
-                            )
-                        )
-                    except Exception:
-                        _log.exception(
-                            f"Caught exception moving player to voice channel"
-                        )
-    # use gather to run the moves concurrently in the event loop
-    # note: a member has to be in a voice channel already for them to be moved, else it throws an exception
-    results = await asyncio.gather(*coroutines, return_exceptions=True)
-    for result in results:
-        # results should be empty unless an exception occured when moving a player
-        if isinstance(result, BaseException):
-            _log.exception("Ignored exception when moving a gameplayer:")
-
-
-@bot.command(usage="<game_id>")
+@bot.tree.command(
+    name="movegameplayers",
+    description="Moves players in an in progress game to their respective voice channels",
+)
+@commands.guild_only()
 @commands.check(is_admin)
-async def movegameplayers(ctx: Context, game_id: str):
+async def movegameplayers(interaction: Interaction, game_id: str):
     """
     Move players in a given in-progress game to the correct voice channels
     """
-    message = ctx.message
+    assert interaction.guild
 
     if not config.ENABLE_VOICE_MOVE:
-        await send_message(
-            message.channel,
-            embed_description="Voice movement is disabled",
-            colour=Colour.red(),
+        await interaction.response.send_message(
+            embed=Embed(
+                description="Voice movement is disabled",
+                colour=Colour.red(),
+            ),
+            ephemeral=True,
         )
         return
     else:
-        await _movegameplayers(game_id, ctx)
-        await send_message(
-            message.channel,
-            embed_description=f"Players moved to voice channels for game {game_id}",
-            colour=Colour.green(),
-        )
+        try:
+            await move_game_players(game_id, interaction)
+        except Exception:
+            await interaction.response.send_message(
+                embed=Embed(
+                    description=f"Failed to move players to voice channels for game {game_id}",
+                    colour=Colour.red(),
+                ),
+            )
+        else:
+            await interaction.response.send_message(
+                embed=Embed(
+                    description=f"Players moved to voice channels for game {game_id}",
+                    colour=Colour.blue(),
+                ),
+            )
 
 
 @bot.command()
@@ -3324,15 +3239,222 @@ async def status(ctx: Context, *args):
         )
 
 
+@bot.tree.command(
+    name="mapstats",
+    description="For a given category, privately displays your winrate per map",
+)
+@discord.app_commands.rename(category_name="category")
+@discord.app_commands.describe(category_name="Optional name of a specific category")
+async def mapstats(interaction: Interaction, category_name: Optional[str] = None):
+    # TODO: merge with /stats by making this a subcommand
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        if category_name:
+            category: Category | None = (
+                session.query(Category).filter(Category.name == category_name).one()
+            )
+            # get the queues for each category, since rotations are per queue and not per category
+            queues: list[Queue] | None = (
+                session.query(Queue).filter(Queue.category_id == category.id).all()
+            )
+        else:
+            queues: list[Queue] | None = session.query(Queue).all()
+        if not queues:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"Could not find any queues",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        rotation_ids = [queue.rotation_id for queue in queues]
+        maps: list[Map] | None = (
+            session.query(Map)
+            .join(RotationMap, RotationMap.map_id == Map.id)
+            .filter(RotationMap.rotation_id.in_(rotation_ids))
+            .order_by(Map.full_name)
+            .all()
+        )
+        if not maps:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"Could not find any maps for category '{category_name}'",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        fgps: List[FinishedGamePlayer] | None = (
+            session.query(FinishedGamePlayer)
+            .filter(FinishedGamePlayer.player_id == interaction.user.id)
+            .all()
+        )
+        if not fgps:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"You have not played any games",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        finished_game_ids: List[str] | None = [fgp.finished_game_id for fgp in fgps]
+        conditions = [FinishedGame.id.in_(finished_game_ids)]
+        if category_name:
+            conditions.append(FinishedGame.category_name == category_name)
+        fgs: List[FinishedGame] | None = (
+            session.query(FinishedGame).filter(*conditions).all()
+        )
+        if not fgs:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    description=f"Could not find any finished games for you",
+                    color=discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+        fgps_by_finished_game_id: dict[str, FinishedGamePlayer] = {
+            fgp.finished_game_id: fgp for fgp in fgps
+        }
+        cols = []
+        for m in maps:
+            def map_stats(finished_games: list[FinishedGame]):
+                wins = [
+                    fg
+                    for fg in finished_games
+                    if fg.winning_team == fgps_by_finished_game_id[fg.id].team
+                ]
+                losses = [
+                    fg
+                    for fg in finished_games
+                    if fg.winning_team != fgps_by_finished_game_id[fg.id].team
+                    and fg.winning_team != -1
+                ]
+                ties = [fg for fg in finished_games if fg.winning_team == -1]
+                return len(wins), len(losses), len(ties)
+
+            fgs_for_map = [fg for fg in fgs if fg.map_full_name == m.full_name]
+            num_games = len(fgs_for_map)
+            if num_games <= 0:
+                continue
+            wins, losses, ties = map_stats(fgs_for_map)
+            wr = win_rate(wins, losses, ties)
+            cols.append(
+                [
+                    m.full_name,
+                    f"{wins}",
+                    f"{losses}",
+                    f"{ties}",
+                    num_games,
+                    f"{wr}%",
+                ]
+            )
+    table = table2ascii(
+        header=["Map", "W", "L", "T", "Total", "WR"],
+        body=cols,
+        style=PresetStyle.plain,
+        first_col_heading=True,
+        alignments=[
+            Alignment.LEFT,
+            Alignment.DECIMAL,
+            Alignment.DECIMAL,
+            Alignment.DECIMAL,
+            Alignment.DECIMAL,
+            Alignment.RIGHT,
+        ],
+    )
+    if category_name:
+        title = f"{interaction.user.display_name} Map Stats for {category_name}"
+    else:
+        title = f"{interaction.user.display_name} Overall Map Stats"
+    embed = discord.Embed(
+        title=title, description=code_block(table), color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="globalmapstats", description="Displays global statistics for each map"
+)
+@discord.app_commands.rename(category_name="category")
+@discord.app_commands.describe(category_name="Optional name of a specific category")
+async def globalmapstats(
+    interaction: discord.Interaction, category_name: Optional[str] = None
+):
+    # Explicitly does not use a discord.Embed, due to the limit of the Embed length (Note: this won't look pretty on mobile)
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        maps: list[Map] | None = session.query(Map).order_by(Map.full_name).all()
+
+        def map_stats(finished_games: list[FinishedGame]):
+            team0_wins = [fg for fg in finished_games if fg.winning_team == 0]
+            team1_wins = [fg for fg in finished_games if fg.winning_team == 1]
+            ties = [fg for fg in finished_games if fg.winning_team == -1]
+            return len(team0_wins), len(team1_wins), len(ties)
+
+        cols = []
+        for m in maps:
+            conditions = [FinishedGame.map_full_name == m.full_name]
+            if category_name:
+                conditions.append(FinishedGame.category_name == category_name)
+            finished_games = session.query(FinishedGame).filter(*conditions).all()
+            num_games = len(finished_games)
+            if num_games <= 0:
+                continue
+            team0_wins, team1_wins, ties = map_stats(finished_games)
+            team0_win_rate = win_rate(team0_wins, team1_wins, ties)
+            team1_win_rate = win_rate(team1_wins, team0_wins, ties)
+            cols.append(
+                [
+                    m.full_name,
+                    team0_wins,
+                    f"{team0_win_rate}%",
+                    team1_wins,
+                    f"{team1_win_rate}%",
+                    ties,
+                    len(finished_games),
+                ]
+            )
+    table = table2ascii(
+        header=["Map", "Team0", "WR", "Team1", "WR", "Ties", "Total"],
+        body=cols,
+        style=PresetStyle.plain,
+        first_col_heading=True,
+        alignments=[
+            Alignment.LEFT,
+            Alignment.DECIMAL,
+            Alignment.RIGHT,
+            Alignment.DECIMAL,
+            Alignment.RIGHT,
+            Alignment.DECIMAL,
+            Alignment.DECIMAL,
+        ],
+    )
+    if category_name:
+        content = f"Global Map Stats for **{category_name}**"
+    else:
+        content = "Global Map Stats"
+    content += f"\n{code_block(table)}"
+    await interaction.response.send_message(
+        content=content
+    )  # TODO: consider making this ephemeral, or giving the option to choose
+
+
 def win_rate(wins, losses, ties):
     denominator = max(wins + losses + ties, 1)
-    return round(100 * (wins + 0.5 * ties) / denominator, 1)
+    return round(
+        100 * (wins + 0.5 * ties) / denominator, 1
+    )  # why are ties counted as half a win?
 
 
 @bot.tree.command(
     name="stats", description="Privately displays your TrueSkill statistics"
 )
-async def stats(interaction: Interaction, category_name: Optional[str] | None):
+@discord.app_commands.rename(category_name="category")
+@discord.app_commands.describe(category_name="Name of the category")
+async def stats(interaction: Interaction, category_name: Optional[str] = None):
     """
     Replies to the user with their TrueSkill statistics. Can be used both inside and out of a Guild
     """
@@ -3461,7 +3583,7 @@ async def stats(interaction: Interaction, category_name: Optional[str] | None):
             for num_days in [7, 30, 90, 365, -1]:
                 wins, losses, ties = wins_losses_ties_last_ndays(games, num_days)
                 num_wins, num_losses, num_ties = len(wins), len(losses), len(ties)
-                winrate = round(win_rate(num_wins, num_losses, num_ties))
+                winrate = round(win_rate(num_wins, num_losses, num_ties), 1)
                 col = [
                     "Total" if num_days == -1 else f"{num_days}D",
                     len(wins),
@@ -3531,9 +3653,9 @@ async def stats(interaction: Interaction, category_name: Optional[str] | None):
                     header=["Last", "W", "L", "T", "Total", "WR"],
                     body=cols,
                     first_col_heading=True,
-                    style=PresetStyle.thin_compact_rounded,
+                    style=PresetStyle.plain,
                     alignments=[
-                        Alignment.RIGHT,
+                        Alignment.LEFT,
                         Alignment.DECIMAL,
                         Alignment.DECIMAL,
                         Alignment.DECIMAL,
@@ -3565,7 +3687,7 @@ async def stats(interaction: Interaction, category_name: Optional[str] | None):
                 header=["Period", "Wins", "Losses", "Ties", "Total", "Win %"],
                 body=cols,
                 first_col_heading=True,
-                style=PresetStyle.minimalist,
+                style=PresetStyle.plain,
                 alignments=[
                     Alignment.LEFT,
                     Alignment.DECIMAL,
@@ -3589,7 +3711,11 @@ async def stats(interaction: Interaction, category_name: Optional[str] | None):
 
 
 @stats.autocomplete("category_name")
-async def stats_autocomplete(interaction: discord.Interaction, current: str):
+@mapstats.autocomplete("category_name")
+async def category_name_autocomplete_with_user_id(
+    interaction: discord.Interaction, current: str
+):
+    # useful for when you want to filter the categories based on the ones the author has games played in
     choices = []
     session: sqlalchemy.orm.Session
     with Session() as session:
@@ -3601,9 +3727,7 @@ async def stats_autocomplete(interaction: discord.Interaction, current: str):
             .limit(25)  # discord only supports up to 25 choices
             .all()
         )
-        _log.info(result)
         category_names: list[str] = [r[0] for r in result] if result else []
-        _log.info(category_names)
         for name in category_names:
             if current in name:
                 choices.append(
@@ -3612,7 +3736,59 @@ async def stats_autocomplete(interaction: discord.Interaction, current: str):
                         value=name,
                     )
                 )
-    _log.info(choices)
+    return choices
+
+
+@globalmapstats.autocomplete("category_name")
+async def category_name_autocomplete_without_user_id(
+    interaction: discord.Interaction, current: str
+):
+    # useful for when you want all of the categories, regardless of whether the user has played games in them
+    choices = []
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        categories: list[Category] | None = (
+            session.query(Category)
+            .order_by(Category.name)
+            .limit(25)  # discord only supports up to 25 choices
+            .all()
+        )
+        if categories:
+            for category in categories:
+                if current in category.name:
+                    choices.append(
+                        discord.app_commands.Choice(
+                            name=category.name,
+                            value=category.name,
+                        )
+                    )
+    return choices
+
+
+def category_name_autocomplete(current: str, user_id: Optional[int] = None):
+    choices = []
+    session: sqlalchemy.orm.Session
+    with Session() as session:
+        conditions = []
+        if user_id:
+            conditions.append(PlayerCategoryTrueskill.player_id == user_id)
+        result = (
+            session.query(Category.name, PlayerCategoryTrueskill.player_id)
+            .join(PlayerCategoryTrueskill)
+            .filter(*conditions)
+            .order_by(Category.name)
+            .limit(25)  # discord only supports up to 25 choices
+            .all()
+        )
+        category_names: list[str] = [r[0] for r in result] if result else []
+        for name in category_names:
+            if current in name:
+                choices.append(
+                    discord.app_commands.Choice(
+                        name=name,
+                        value=name,
+                    )
+                )
     return choices
 
 
@@ -3739,7 +3915,7 @@ async def _rebalance_game(
     short_game_id: str = short_uuid(game.id)
     if config.ENABLE_VOICE_MOVE:
         if queue.move_enabled:
-            await _movegameplayers(short_game_id, None, message.guild)
+            await move_game_players(short_game_id, None, message.guild)
             await send_message(
                 message.channel,
                 embed_description=f"Players moved to new team voice channels for game {short_game_id}",

@@ -36,6 +36,7 @@ from discord_bots.utils import (
     short_uuid,
     upload_stats_screenshot_imgkit_channel,
     upload_stats_screenshot_imgkit_interaction,
+    move_game_players_lobby
 )
 
 if TYPE_CHECKING:
@@ -362,9 +363,10 @@ class InProgressGameCog(commands.Cog):
         else:
             category_name = None
 
+        game_finished_at = datetime.now(timezone.utc)
         finished_game = FinishedGame(
             average_trueskill=in_progress_game.average_trueskill,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=game_finished_at,
             game_id=in_progress_game.id,
             is_rated=queue.is_rated,
             map_full_name=in_progress_game.map_full_name,
@@ -405,6 +407,7 @@ class InProgressGameCog(commands.Cog):
             team_players: list[InProgressGamePlayer],
             ratings_before: list[Rating],
             ratings_after: list[Rating],
+            game_finished_at: datetime,
         ):
             for i, team_gip in enumerate(team_players):
                 player = players_by_id[team_gip.player_id]
@@ -429,6 +432,7 @@ class InProgressGameCog(commands.Cog):
                     pct.mu = trueskill_rating.mu
                     pct.sigma = trueskill_rating.sigma
                     pct.rank = trueskill_rating.mu - 3 * trueskill_rating.sigma
+                    pct.last_game_finished_at = game_finished_at
                 else:
                     session.add(
                         PlayerCategoryTrueskill(
@@ -437,15 +441,16 @@ class InProgressGameCog(commands.Cog):
                             mu=trueskill_rating.mu,
                             sigma=trueskill_rating.sigma,
                             rank=trueskill_rating.mu - 3 * trueskill_rating.sigma,
+                            last_game_finished_at=game_finished_at,
                         )
                     )
                 session.add(finished_game_player)
 
         update_ratings(
-            team0_players, team0_rated_ratings_before, team0_rated_ratings_after
+            team0_players, team0_rated_ratings_before, team0_rated_ratings_after, game_finished_at
         )
         update_ratings(
-            team1_players, team1_rated_ratings_before, team1_rated_ratings_after
+            team1_players, team1_rated_ratings_before, team1_rated_ratings_after, game_finished_at
         )
         session.commit()  # temporary solution until the foreign key constraint is resolved on EconomyPredictions/EconomyTransactions
         if config.ECONOMY_ENABLED:
@@ -589,6 +594,12 @@ class InProgressGameCog(commands.Cog):
         ).delete()
         session.commit()  # if you remove this commit, then there is a chance for the DB to lockup if someone types a message at the same time
 
+        if config.ENABLE_VOICE_MOVE and config.VOICE_MOVE_LOBBY:
+            try:
+                await move_game_players_lobby(game.id, interaction.guild)
+            except Exception:
+                _log.exception("Ignored exception when moving a gameplayer to lobby:")
+        
         for ipg_channel in session.query(InProgressGameChannel).filter(
             InProgressGameChannel.in_progress_game_id == game.id
         ):

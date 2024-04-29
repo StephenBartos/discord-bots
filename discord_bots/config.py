@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import logging
 import os
 from logging.handlers import RotatingFileHandler
@@ -105,6 +106,27 @@ def _to_bool(
             _log.error(f"{key} must be specified correctly, was '{value}'")
         return default
 
+# Parse an ISO time string env var into a datetime.time object
+def _to_time(
+    key: str, required: bool = False, default: datetime.time | None = None
+) -> datetime.time | None:
+    global CONFIG_IS_VALID
+    value = os.getenv(key)
+    if value is None and default is not None:
+        return default
+    if required and value is None:
+        CONFIG_IS_VALID = False
+        _log.error(f"{key} must be specified correctly, was '{value}'")
+        return None
+    
+    try:
+        return datetime.time.fromisoformat(value or "")
+    except:
+        if required:
+            CONFIG_IS_VALID = False
+            _log.error(f"{key} must be specified correctly, was '{value}'")
+        return None
+
 
 def _convert_to_int(value: str) -> int | None:
     try:
@@ -133,6 +155,7 @@ SEED_ADMIN_IDS: list[int] = list(
 )
 ENABLE_VOICE_MOVE: bool = _to_bool(key="ENABLE_VOICE_MOVE", default=False)
 DEFAULT_VOICE_MOVE: bool = _to_bool(key="DEFAULT_VOICE_MOVE", default=False)
+VOICE_MOVE_LOBBY: int = _to_int(key="VOICE_MOVE_LOBBY", required=False)
 ALLOW_VULGAR_NAMES: bool = _to_bool(key="ALLOW_VULGAR_NAMES", default=False)
 ENABLE_DEBUG: bool = _to_bool(key="ENABLE_DEBUG", default=False)
 ENABLE_RAFFLE: bool = _to_bool(key="ENABLE_RAFFLE", default=False)
@@ -149,6 +172,7 @@ DEFAULT_TRUESKILL_MU = _to_float(key="DEFAULT_TRUESKILL_MU", default=25)
 DEFAULT_TRUESKILL_SIGMA = _to_float(
     key="DEFAULT_TRUESKILL_SIGMA", default=DEFAULT_TRUESKILL_MU / 3
 )
+TRUESKILL_SIGMA_DECAY_JOB_SCHEDULED_TIME: datetime.time = _to_time(key="TRUESKILL_SIGMA_DECAY_JOB_SCHEDULED_TIME", default=datetime.time(0, 0, tzinfo=datetime.timezone.utc))
 AFK_TIME_MINUTES: int = _to_int(key="AFK_TIME_MINUTES", default=45)
 MAP_ROTATION_MINUTES: int = _to_int(key="MAP_ROTATION_MINUTES", default=60)
 DEFAULT_RAFFLE_VALUE: int = _to_int(key="DEFAULT_RAFFLE_VALUE", default=5)
