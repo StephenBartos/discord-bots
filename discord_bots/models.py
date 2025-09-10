@@ -1288,7 +1288,7 @@ class QueueRole:
         },
     )
     role_id: int = field(
-        metadata={"sa": Column(BigInteger, nullable=False)},
+        metadata={"sa": Column(Integer, nullable=False)},
     )
     id: str = field(
         init=False,
