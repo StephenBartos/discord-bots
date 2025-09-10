@@ -43,6 +43,7 @@ import discord_bots.config as config
 from discord_bots.bot import bot
 from discord_bots.models import (
     Category,
+    Config,
     CustomCommand,
     FinishedGame,
     FinishedGamePlayer,
@@ -53,6 +54,7 @@ from discord_bots.models import (
     MapVote,
     Player,
     PlayerCategoryTrueskill,
+    Position,
     Queue,
     QueuePlayer,
     QueueWaitlistPlayer,
@@ -66,9 +68,9 @@ from discord_bots.models import (
 _log = logging.getLogger(__name__)
 
 
-MU_LOWER_UNICODE = "\u03BC"
-SIGMA_LOWER_UNICODE = "\u03C3"
-DELTA_UPPER_UNICODE = "\u03B4"
+MU_LOWER_UNICODE = "\u03bc"
+SIGMA_LOWER_UNICODE = "\u03c3"
+DELTA_UPPER_UNICODE = "\u03b4"
 
 
 def build_category_str(category: Category) -> str:
@@ -78,8 +80,12 @@ def build_category_str(category: Category) -> str:
     output += "- _Sigma decay settings:_\n"
     output += f" - _Decay amount: {category.sigma_decay_amount}_\n"
     output += f" - _Grace days: {category.sigma_decay_grace_days}_\n"
-    output += f" - _Max decay proportion: {category.sigma_decay_max_decay_proportion}_\n"
-    output += f"- _Minimum games for leaderboard: {category.min_games_for_leaderboard}_\n"
+    output += (
+        f" - _Max decay proportion: {category.sigma_decay_max_decay_proportion}_\n"
+    )
+    output += (
+        f"- _Minimum games for leaderboard: {category.min_games_for_leaderboard}_\n"
+    )
     session: SQLAlchemySession
     with Session() as session:
         queue_names = [
@@ -623,28 +629,68 @@ async def create_in_progress_game_embed(
         tzinfo=timezone.utc
     )  # timezones aren't stored in the DB, so add it ourselves
     timestamp = discord.utils.format_dt(aware_db_datetime, style="R")
-    result: list[str] | None = (
+    non_position_result: list[str] | None = (
         session.query(Player.name)
-        .join(InProgressGamePlayer)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
         .filter(
             InProgressGamePlayer.in_progress_game_id == game.id,
             InProgressGamePlayer.team == 0,
         )
         .all()
     )
-    team0_player_names = [name[0] for name in result if name] if result else []
-    result: list[str] | None = (
+    position_result: list[str] | None = (
+        session.query(Player.name, Position.short_name)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
+        .join(Position, InProgressGamePlayer.position_id == Position.id)
+        .filter(
+            InProgressGamePlayer.in_progress_game_id == game.id,
+            InProgressGamePlayer.team == 0,
+        )
+        .all()
+    )
+    if position_result:
+        team0_player_names: list[str] = (
+            [f"{name[0]} ({name[1]})" for name in position_result if name]
+            if position_result
+            else []
+        )
+    else:
+        team0_player_names: list[str] = (
+            [f"{name[0]}" for name in non_position_result if name]
+            if non_position_result
+            else []
+        )
+    non_position_result: list[str] | None = (
         session.query(Player.name)
-        .join(InProgressGamePlayer)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
         .filter(
             InProgressGamePlayer.in_progress_game_id == game.id,
             InProgressGamePlayer.team == 1,
         )
         .all()
     )
-    team1_player_names: list[str] = (
-        [name[0] for name in result if name] if result else []
+    position_result: list[str] | None = (
+        session.query(Player.name, Position.short_name)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
+        .join(Position, InProgressGamePlayer.position_id == Position.id)
+        .filter(
+            InProgressGamePlayer.in_progress_game_id == game.id,
+            InProgressGamePlayer.team == 1,
+        )
+        .all()
     )
+    if position_result:
+        team1_player_names: list[str] = (
+            [f"{name[0]} ({name[1]})" for name in position_result if name]
+            if position_result
+            else []
+        )
+    else:
+        team1_player_names: list[str] = (
+            [f"{name[0]}" for name in non_position_result if name]
+            if non_position_result
+            else []
+        )
     if config.SHOW_CAPTAINS:
         if team0_player_names:
             team0_player_names[0] = "(C) " + team0_player_names[0]
@@ -732,32 +778,54 @@ async def create_condensed_in_progress_game_embed(
     )  # timezones aren't stored in the DB, so add it ourselves
     timestamp = discord.utils.format_dt(aware_db_datetime, style="R")
     result: list[str] | None = (
-        session.query(Player.name)
-        .join(InProgressGamePlayer)
+        session.query(Player.name, InProgressGamePlayer.position_id)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
         .filter(
             InProgressGamePlayer.in_progress_game_id == game.id,
             InProgressGamePlayer.team == 0,
         )
         .all()
     )
-    team0_player_names = [f"**{name[0]}**" for name in result if name] if result else []
+    team0_player_names: list[str] = []
+    for igp in result:
+        if igp.position_id:
+            position = (
+                session.query(Position).filter(Position.id == igp.position_id).first()
+            )
+            if position:
+                team0_player_names.append(f"{igp.name} ({position.short_name})")
+            else:
+                team0_player_names.append(f"{igp.name}")
+        else:
+            team0_player_names.append(f"{igp.name}")
     result: list[str] | None = (
-        session.query(Player.name)
-        .join(InProgressGamePlayer)
+        session.query(Player.name, InProgressGamePlayer.position_id)
+        .join(InProgressGamePlayer, Player.id == InProgressGamePlayer.player_id)
         .filter(
             InProgressGamePlayer.in_progress_game_id == game.id,
             InProgressGamePlayer.team == 1,
         )
         .all()
     )
-    team1_player_names: list[str] = (
-        [f"**{name[0]}**" for name in result if name] if result else []
-    )
+    team1_player_names: list[str] = []
+    for igp in result:
+        if igp.position_id:
+            position = (
+                session.query(Position).filter(Position.id == igp.position_id).first()
+            )
+            if position:
+                team1_player_names.append(f"{igp.name} ({position.short_name})")
+            else:
+                team1_player_names.append(f"{igp.name}")
+        else:
+            team1_player_names.append(f"{igp.name}")
+
     if config.SHOW_CAPTAINS:
         if team0_player_names:
             team0_player_names[0] = "(C) " + team0_player_names[0]
         if team1_player_names:
             team1_player_names[0] = "(C) " + team1_player_names[0]
+
     # sort the names alphabetically and caselessly to make them easier to read
     team0_player_names.sort(key=str.casefold)
     team1_player_names.sort(key=str.casefold)
@@ -825,23 +893,33 @@ def create_finished_game_embed(
         user_name, display_name = name_tuple[0], name_tuple[1]
         embed.set_footer(text=f"Finished by {display_name} ({user_name})")
     result = (
-        session.query(FinishedGamePlayer.player_name)
+        session.query(FinishedGamePlayer)
         .filter(
             FinishedGamePlayer.finished_game_id == finished_game.id,
             FinishedGamePlayer.team == 0,
         )
         .all()
     )
-    team0_player_names: list[str] = [p.player_name for p in result] if result else []
+    team0_player_names: list[str] = []
+    for p in result:
+        if p.position_name:
+            team0_player_names.append(f"{p.player_name} ({p.position_name})")
+        else:
+            team0_player_names.append(f"{p.player_name}")
     result = (
-        session.query(FinishedGamePlayer.player_name)
+        session.query(FinishedGamePlayer)
         .filter(
             FinishedGamePlayer.finished_game_id == finished_game.id,
             FinishedGamePlayer.team == 1,
         )
         .all()
     )
-    team1_player_names: list[str] = [p.player_name for p in result] if result else []
+    team1_player_names: list[str] = []
+    for p in result:
+        if p.position_name:
+            team1_player_names.append(f"{p.player_name} ({p.position_name})")
+        else:
+            team1_player_names.append(f"{p.player_name}")
     # sort the names alphabetically and caselessly to make them easier to read
     team0_player_names.sort(key=str.casefold)
     team1_player_names.sort(key=str.casefold)
@@ -1096,7 +1174,7 @@ def win_probability_matchmaking(team0: list[Rating], team1: list[Rating]) -> flo
     """
     mmu = lambda p: p.mu - config.MM_SIGMA_MULT * p.sigma
     delta_mu = sum(mmu(r) for r in team0) - sum(mmu(r) for r in team1)
-    sum_sigma = sum(r.sigma ** 2 for r in itertools.chain(team0, team1))
+    sum_sigma = sum(r.sigma**2 for r in itertools.chain(team0, team1))
     size = len(team0) + len(team1)
     denom = math.sqrt(size * config.DEFAULT_TRUESKILL_BETA**2 + sum_sigma)
     trueskill = global_env()
@@ -1110,7 +1188,7 @@ def win_probability(team0: list[Rating], team1: list[Rating]) -> float:
     Taken from https://trueskill.org/#win-probability
     """
     delta_mu = sum(r.mu for r in team0) - sum(r.mu for r in team1)
-    sum_sigma = sum(r.sigma ** 2 for r in itertools.chain(team0, team1))
+    sum_sigma = sum(r.sigma**2 for r in itertools.chain(team0, team1))
     size = len(team0) + len(team1)
     denom = math.sqrt(size * config.DEFAULT_TRUESKILL_BETA**2 + sum_sigma)
     trueskill = global_env()
@@ -1149,14 +1227,18 @@ async def execute_map_rotation(rotation_id: str, is_verbose: bool):
             rank_subquery = (
                 session.query(
                     RotationMapHistory.rotation_map_id,
-                    func.rank().over(order_by=RotationMapHistory.selected_at.desc()).label('rank'))
+                    func.rank()
+                    .over(order_by=RotationMapHistory.selected_at.desc())
+                    .label("rank"),
+                )
                 .filter(RotationMapHistory.rotation_id == rotation_id)
                 .subquery()
             )
             history = (
-                session.query(rank_subquery.c.rotation_map_id, func.min(rank_subquery.c.rank))
-                .group_by(
-                    rank_subquery.c.rotation_map_id)
+                session.query(
+                    rank_subquery.c.rotation_map_id, func.min(rank_subquery.c.rank)
+                )
+                .group_by(rank_subquery.c.rotation_map_id)
                 .all()
             )
 
@@ -1166,15 +1248,20 @@ async def execute_map_rotation(rotation_id: str, is_verbose: bool):
                     # rank for the currently selected map is 1
                     # subtract 1 from rank to get "maps inbetween"
                     maps_inbetween = [h[1] for h in history if h[0] == m.id][0] - 1
-                    eligible_since = max(0, maps_inbetween - rotation.min_maps_before_requeue)
+                    eligible_since = max(
+                        0, maps_inbetween - rotation.min_maps_before_requeue
+                    )
                 except IndexError:
                     eligible_since = history_length
 
-
-                weight = m.random_weight + math.floor(eligible_since * rotation.weight_increase)
+                weight = m.random_weight + math.floor(
+                    eligible_since * rotation.weight_increase
+                )
                 blocked = m.is_next or eligible_since == 0
                 maps_for_random.append(
-                    _MapForRandom(rotation_map_id=m.id, random_weight=weight, is_blocked=blocked)
+                    _MapForRandom(
+                        rotation_map_id=m.id, random_weight=weight, is_blocked=blocked
+                    )
                 )
 
             eligible_maps = [m for m in maps_for_random if not m.is_blocked]
@@ -1188,12 +1275,10 @@ async def execute_map_rotation(rotation_id: str, is_verbose: bool):
                     f"[execute_map_rotation] No map available for rotation {rotation.name} even when considering blocked maps."
                 )
                 return
-            following_rotation_map_id = (
-                choices(
-                    [x.rotation_map_id for x in eligible_maps],
-                    weights=[x.random_weight for x in eligible_maps]
-                )[0]
-            )
+            following_rotation_map_id = choices(
+                [x.rotation_map_id for x in eligible_maps],
+                weights=[x.random_weight for x in eligible_maps],
+            )[0]
         else:
             current_rotation_map: RotationMap | None = (
                 session.query(RotationMap)
@@ -1206,7 +1291,9 @@ async def execute_map_rotation(rotation_id: str, is_verbose: bool):
                 .filter(RotationMap.rotation_id == rotation_id)
                 .count()
             )
-            following_ordinal = current_rotation_map.ordinal + 1 if current_rotation_map else 1
+            following_ordinal = (
+                current_rotation_map.ordinal + 1 if current_rotation_map else 1
+            )
             if following_ordinal > rotation_map_length:
                 following_ordinal = 1
 
@@ -1245,10 +1332,9 @@ async def update_next_map(
             .filter(RotationMap.id == new_rotation_map_id)
             .one()
         )
-        session.query(RotationMap) \
-            .filter(RotationMap.rotation_id == rotation_id) \
-            .filter(RotationMap.is_next == True) \
-            .update({"is_next": False})
+        session.query(RotationMap).filter(
+            RotationMap.rotation_id == rotation_id
+        ).filter(RotationMap.is_next == True).update({"is_next": False})
         next_rotation_map.is_next = True
 
         history = RotationMapHistory(
@@ -1264,18 +1350,16 @@ async def update_next_map(
         )
         for map_vote in map_votes:
             session.delete(map_vote)
-        session.query(SkipMapVote) \
-            .filter(SkipMapVote.rotation_id == rotation_id) \
-            .delete()
+        session.query(SkipMapVote).filter(
+            SkipMapVote.rotation_id == rotation_id
+        ).delete()
         session.commit()
 
         channel = bot.get_channel(config.CHANNEL_ID)
         if isinstance(channel, discord.TextChannel):
             if is_verbose:
                 next_map: Map = (
-                    session.query(Map)
-                    .filter(Map.id == next_rotation_map.map_id)
-                    .one()
+                    session.query(Map).filter(Map.id == next_rotation_map.map_id).one()
                 )
                 affected_queues: list[Queue] = (
                     session.query(Queue).filter(Queue.rotation_id == rotation_id).all()
@@ -1882,7 +1966,11 @@ async def category_autocomplete_with_user_id(interaction: Interaction, current: 
         result = (
             session.query(Category.name, PlayerCategoryTrueskill.player_id)
             .join(PlayerCategoryTrueskill)
-            .filter(PlayerCategoryTrueskill.player_id == interaction.user.id)
+            .filter(
+                PlayerCategoryTrueskill.player_id == interaction.user.id,
+                Category.is_rated,
+            )
+            .distinct(Category.name)
             .order_by(Category.name)
             .limit(25)  # discord only supports up to 25 choices
             .all()
@@ -1909,6 +1997,8 @@ async def category_name_autocomplete_without_user_id(
     with Session() as session:
         categories: list[Category] | None = (
             session.query(Category)
+            .filter(Category.is_rated)
+            .distinct(Category.name)
             .order_by(Category.name)
             .limit(25)  # discord only supports up to 25 choices
             .all()
@@ -1922,6 +2012,85 @@ async def category_name_autocomplete_without_user_id(
                     discord.app_commands.Choice(
                         name=category.name,
                         value=category.name,
+                    )
+                )
+    return choices
+
+
+async def position_autocomplete_with_user_id(interaction: Interaction, current: str):
+    # useful for when you want to filter the positions based on the ones the author has games played in
+    choices = []
+    session: SQLAlchemySession
+    with Session() as session:
+        player_category_trueskills: list[PlayerCategoryTrueskill] = (
+            session.query(PlayerCategoryTrueskill)
+            .join(Category, Category.id == PlayerCategoryTrueskill.category_id)
+            .filter(
+                PlayerCategoryTrueskill.player_id == interaction.user.id,
+                PlayerCategoryTrueskill.position_id != None,
+                Category.is_rated,
+            )
+            .all()
+        )
+        position_ids: list[str] = [
+            pct.position_id for pct in player_category_trueskills
+        ]
+        result = (
+            session.query(Position)
+            .filter(
+                Position.id.in_(position_ids),
+            )
+            .distinct(Position.name)
+            .order_by(Position.name)
+            .limit(25)  # discord only supports up to 25 choices
+            .all()
+        )
+        positions: list[Position] = result if result else []
+        current_casefold = current.casefold()
+        for position in positions:
+            if current_casefold in position.name.casefold():
+                choices.append(
+                    discord.app_commands.Choice(
+                        name=position.name,
+                        value=position.short_name,
+                    )
+                )
+    return choices
+
+
+async def map_autocomplete_with_user_id(interaction: Interaction, current: str):
+    # useful for when you want to filter the maps based on the ones the author has games played in
+    choices = []
+    session: SQLAlchemySession
+    with Session() as session:
+        player_category_trueskills: list[PlayerCategoryTrueskill] = (
+            session.query(PlayerCategoryTrueskill)
+            .join(Category, Category.id == PlayerCategoryTrueskill.category_id)
+            .filter(
+                PlayerCategoryTrueskill.player_id == interaction.user.id,
+                PlayerCategoryTrueskill.map_id != None,
+                Category.is_rated,
+            )
+            .limit(25)  # discord only supports up to 25 choices
+            .all()
+        )
+        map_ids: list[str] = [pct.map_id for pct in player_category_trueskills]
+        result = (
+            session.query(Map)
+            .filter(Map.id.in_(map_ids))
+            .distinct(Map.full_name)
+            .order_by(Map.full_name)
+            .limit(25)  # discord only supports up to 25 choices
+            .all()
+        )
+        maps: list[Map] = result if result else []
+        current_casefold = current.casefold()
+        for map in maps:
+            if current_casefold in map.full_name.casefold():
+                choices.append(
+                    discord.app_commands.Choice(
+                        name=map.full_name,
+                        value=map.full_name,
                     )
                 )
     return choices
@@ -2014,7 +2183,9 @@ def get_team_voice_channels(
         .all()
     )
     for ipg_channel in ipg_channels or []:
-        discord_channel: discord.abc.GuildChannel | None = guild.get_channel(ipg_channel.channel_id)
+        discord_channel: discord.abc.GuildChannel | None = guild.get_channel(
+            ipg_channel.channel_id
+        )
         if isinstance(discord_channel, VoiceChannel):
             # This is suboptimal and fragile solution but it's good enough for now. We should keep track of each team's VC in the database
             if in_progress_game.team0_name in discord_channel.name:
@@ -2022,6 +2193,119 @@ def get_team_voice_channels(
             elif in_progress_game.team1_name in discord_channel.name:
                 team1_vc = discord_channel
     return team0_vc, team1_vc
+
+
+def flatten_list(l: list[list[any]]) -> list[any]:
+    return [item for sublist in l for item in sublist]
+
+
+def get_category_trueskill(
+    session: SQLAlchemySession,
+    config: Config,
+    player_id: int,
+    queue_enabled_map_trueskill: bool,
+    category_id: str,
+    map_id: str,
+    position_id: str | None = None,
+) -> PlayerCategoryTrueskill:
+    """
+    Fetch the appropriate category trueskill given the parameters.
+
+    This will create the appropriate PlayerCategoryTrueskill if not found.
+    """
+    if not config.enable_position_trueskill:
+        position_id = None
+    if not config.enable_map_trueskill or not queue_enabled_map_trueskill:
+        map_id = None
+
+    pct = (
+        session.query(PlayerCategoryTrueskill)
+        .filter(
+            PlayerCategoryTrueskill.player_id == player_id,
+            PlayerCategoryTrueskill.category_id == category_id,
+            PlayerCategoryTrueskill.position_id == position_id,
+            PlayerCategoryTrueskill.map_id == map_id,
+        )
+        .first()
+    )
+    if pct:
+        return pct
+
+    # We couldn't find a matching PCT, so find the nearest parent and create
+    # a new one based on that
+    mu_to_use = None
+    sigma_to_use = None
+
+    if position_id:
+        # Try to find a one with a map but no position
+        positionless_pct = (
+            session.query(PlayerCategoryTrueskill)
+            .filter(
+                PlayerCategoryTrueskill.player_id == player_id,
+                PlayerCategoryTrueskill.category_id == category_id,
+                PlayerCategoryTrueskill.position_id == None,
+                PlayerCategoryTrueskill.map_id == map_id,
+            )
+            .first()
+        )
+        if positionless_pct:
+            mu_to_use = positionless_pct.mu
+            sigma_to_use = positionless_pct.sigma
+
+    elif map_id:
+        # Try to find a one with a position but no map
+        mapless_pct = (
+            session.query(PlayerCategoryTrueskill)
+            .filter(
+                PlayerCategoryTrueskill.player_id == player_id,
+                PlayerCategoryTrueskill.category_id == category_id,
+                PlayerCategoryTrueskill.position_id == position_id,
+                PlayerCategoryTrueskill.map_id == None,
+            )
+            .first()
+        )
+        if mapless_pct:
+            mu_to_use = mapless_pct.mu
+            sigma_to_use = mapless_pct.sigma
+
+    if mu_to_use is None and sigma_to_use is None:
+        # Try category alone, no position or map
+        category_only_pct = (
+            session.query(PlayerCategoryTrueskill)
+            .filter(
+                PlayerCategoryTrueskill.player_id == player_id,
+                PlayerCategoryTrueskill.category_id == category_id,
+                PlayerCategoryTrueskill.position_id == None,
+                PlayerCategoryTrueskill.map_id == None,
+            )
+            .first()
+        )
+        if category_only_pct:
+            mu_to_use = category_only_pct.mu
+            sigma_to_use = category_only_pct.sigma
+
+    # We couldn't find any player_category_trueskill, so use the global player one
+    if mu_to_use is None and sigma_to_use is None:
+        player: Player = session.query(Player).filter(Player.id == player_id).first()
+        mu_to_use = player.rated_trueskill_mu
+        sigma_to_use = player.rated_trueskill_sigma
+
+    # Since this is a new PCT, juice up the sigma so it can adjust quicker
+    sigma_to_use = min(2 * sigma_to_use, config.default_trueskill_sigma)
+
+    new_pct = PlayerCategoryTrueskill(
+        player_id=player_id,
+        category_id=category_id,
+        position_id=position_id,
+        map_id=map_id,
+        mu=mu_to_use,
+        sigma=sigma_to_use,
+        rank=mu_to_use - 3 * sigma_to_use,
+        last_game_finished_at=datetime.now(timezone.utc),
+    )
+    session.add(new_pct)
+    session.commit()
+    return new_pct
 
 
 @dataclass

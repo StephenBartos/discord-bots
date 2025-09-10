@@ -10,23 +10,20 @@ from sqlalchemy.orm.session import Session as SQLAlchemySession
 from table2ascii import Alignment, PresetStyle, table2ascii
 from trueskill import Rating
 
-from discord_bots.bot import bot
 from discord_bots.checks import is_command_channel
 from discord_bots.cogs.base import BaseCog
-from discord_bots.config import (
-    DEFAULT_RAFFLE_VALUE,
-    DEFAULT_TRUESKILL_MU,
-    DEFAULT_TRUESKILL_SIGMA,
-    SHOW_TRUESKILL,
-)
+from discord_bots.config import SHOW_TRUESKILL
 from discord_bots.models import (
     Category,
+    Config,
     FinishedGame,
     FinishedGamePlayer,
     InProgressGame,
     InProgressGamePlayer,
+    Map,
     Player,
     PlayerCategoryTrueskill,
+    Position,
     Session,
 )
 from discord_bots.utils import (
@@ -36,6 +33,8 @@ from discord_bots.utils import (
     category_autocomplete_with_user_id,
     code_block,
     get_guild_partial_message,
+    map_autocomplete_with_user_id,
+    position_autocomplete_with_user_id,
     send_in_guild_message,
     short_uuid,
 )
@@ -46,7 +45,6 @@ _log = logging.getLogger(__name__)
 class CommonCommands(BaseCog):
     def __init__(self, bot: Bot):
         super().__init__(bot)
-
 
     @app_commands.command(
         name="setgamecode", description="Sets lobby code for your current game"
@@ -211,6 +209,7 @@ class CommonCommands(BaseCog):
         """
         session: SQLAlchemySession
         with Session() as session:
+            config = session.query(Config).first()
             player: Player | None = (
                 session.query(Player).filter(Player.id == interaction.user.id).first()
             )
@@ -281,8 +280,8 @@ class CommonCommands(BaseCog):
                         and x.rated_trueskill_sigma != default_rating.sigma
                     )
                     and (
-                        x.rated_trueskill_mu != DEFAULT_TRUESKILL_MU
-                        and x.rated_trueskill_sigma != DEFAULT_TRUESKILL_SIGMA
+                        x.rated_trueskill_mu != config.default_trueskill_mu
+                        and x.rated_trueskill_sigma != config.default_trueskill_sigma
                     ),
                     players,
                 )
@@ -365,85 +364,138 @@ class CommonCommands(BaseCog):
                     cols.append(col)
                 return cols
 
-            embeds: list[Embed] = []
             message_content = ""  # TODO: temp fix
-            footer_text = f"Rating = {MU_LOWER_UNICODE} - 3*{SIGMA_LOWER_UNICODE}"
+            footer_text = f"-# Rank = {MU_LOWER_UNICODE} - 3*{SIGMA_LOWER_UNICODE}"
             cols = []
             conditions = []
             conditions.append(PlayerCategoryTrueskill.player_id == player.id)
+            categories = []
             if category_name:
-                conditions.append(Category.name == category_name)
-            player_category_trueskills: list[PlayerCategoryTrueskill] | None = (
-                session.query(PlayerCategoryTrueskill)
-                .join(Category)
-                .filter(*conditions)
-                .order_by(Category.name)
-                .all()
-            )
-            # assume that if a guild uses categories, they will use them exclusively, i.e., no mixing categorized and uncategorized queues
-            if player_category_trueskills:
-                num_pct = len(player_category_trueskills)
-                for i, pct in enumerate(player_category_trueskills):
-                    category: Category | None = (
-                        session.query(Category)
-                        .filter(Category.id == pct.category_id)
-                        .first()
-                    )
-                    if not category:
-                        # should never happen
-                        _log.error(
-                            f"No Category found for player_category_trueskill with id {pct.id}"
-                        )
-                        await interaction.response.send_message(
-                            embed=Embed(description="Could not find your stats")
-                        )
-                        return
-                    title = f"TrueSkill for {category.name}"
-                    if category.is_rated and SHOW_TRUESKILL:
-                        description = (
-                            f"Rating: **{round(pct.rank, 1)}**"
-                            f" `{MU_LOWER_UNICODE}: {round(pct.mu, 1)}`, "
-                            f"`{SIGMA_LOWER_UNICODE}: {round(pct.sigma, 1)}` "
-                        )
-                    else:
-                        description = f"Rating: {trueskill_pct}"
+                category = (
+                    session.query(Category)
+                    .filter(Category.name == category_name, Category.is_rated)
+                    .first()
+                )
+                if category:
+                    categories.append(category)
+            else:
+                categories = session.query(Category).filter(Category.is_rated).all()
 
-                    category_games = [
-                        game
-                        for game in fgs
-                        if game.category_name and category.name == game.category_name
-                    ]
-                    cols = get_table_col(category_games)
-                    table = table2ascii(
-                        header=["Last", "W", "L", "T", "Total", "WR"],
-                        body=cols,
-                        first_col_heading=True,
-                        style=PresetStyle.plain,
-                        alignments=[
-                            Alignment.RIGHT,
-                            Alignment.DECIMAL,
-                            Alignment.DECIMAL,
-                            Alignment.DECIMAL,
-                            Alignment.DECIMAL,
-                            Alignment.RIGHT,
-                        ],
+            # assume that if a guild uses categories, they will use them exclusively, i.e., no mixing categorized and uncategorized queues
+            if categories:
+                first_message_sent = False
+                count = 0
+                categories = sorted(categories, key=lambda x: x.name)
+                for i_category, category in enumerate(categories):
+                    player_category_trueskills = (
+                        session.query(PlayerCategoryTrueskill, Map, Position)
+                        .join(
+                            Map, Map.id == PlayerCategoryTrueskill.map_id, isouter=True
+                        )
+                        .join(
+                            Position,
+                            Position.id == PlayerCategoryTrueskill.position_id,
+                            isouter=True,
+                        )
+                        .filter(
+                            PlayerCategoryTrueskill.category_id == category.id,
+                            PlayerCategoryTrueskill.player_id == player.id,
+                        )
+                        .all()
                     )
-                    description += code_block(table)
-                    embed = Embed(
-                        title=title, description=description, color=Colour.dark_embed()
+                    player_category_trueskills = sorted(
+                        player_category_trueskills,
+                        key=lambda x: (
+                            x[1].full_name if x[1] else "",
+                            x[2].name if x[2] else "",
+                        ),
                     )
-                    message_content += f"\n{title}\n{description}"  # TODO: temp fix
-                    if i == (num_pct - 1):
-                        # only add the footer to the last embed so we don't duplicate the information
-                        embed.set_footer(text=footer_text)
-                    embeds.append(embed)
+                    if not config.enable_map_trueskill:
+                        player_category_trueskills = filter(
+                            lambda x: x[1] is None,
+                            player_category_trueskills,
+                        )
+                    if not config.enable_position_trueskill:
+                        player_category_trueskills = filter(
+                            lambda x: x[2] is None,
+                            player_category_trueskills,
+                        )
+                    for pct, map, position in player_category_trueskills:
+                        title = f"TrueSkill for {category.name}"
+                        category_filters = [
+                            FinishedGamePlayer.player_id == player.id,
+                            FinishedGame.category_name == category.name,
+                        ]
+                        if map:
+                            title = f"{title} ({map.full_name})"
+                            category_filters.append(
+                                FinishedGame.map_full_name == map.full_name
+                            )
+                        if position:
+                            title = f"{title} ({position.short_name})"
+                            category_filters.append(
+                                FinishedGamePlayer.position_name == position.short_name
+                            )
+                        category_games = (
+                            session.query(FinishedGame)
+                            .join(FinishedGamePlayer)
+                            .filter(*category_filters)
+                            .all()
+                        )
+                        if category.is_rated and SHOW_TRUESKILL:
+                            description = (
+                                f"`Rank: {round(pct.rank, 1)}`,"
+                                f" `{MU_LOWER_UNICODE}: {round(pct.mu, 1)}`, "
+                                f"`{SIGMA_LOWER_UNICODE}: {round(pct.sigma, 1)}` "
+                            )
+                        else:
+                            description = f"Rating: {trueskill_pct}"
+
+                        message_content += f"\n{title}\n{description}"  # TODO: temp fix
+                        count += 1
+
+                        cols = get_table_col(category_games)
+                        table = table2ascii(
+                            header=["Last", "W", "L", "T", "Total", "WR"],
+                            body=cols,
+                            first_col_heading=True,
+                            style=PresetStyle.plain,
+                            alignments=[
+                                Alignment.RIGHT,
+                                Alignment.DECIMAL,
+                                Alignment.DECIMAL,
+                                Alignment.DECIMAL,
+                                Alignment.DECIMAL,
+                                Alignment.RIGHT,
+                            ],
+                        )
+                        description = code_block(table)
+                        message_content += f"\n{description}"  # TODO: temp fix
+
+                        # Chunk the responses to avoid getting rate limited by discord
+                        if count % 4 == 0:
+                            if not first_message_sent:
+                                # The first one has to be a message
+                                await interaction.response.send_message(
+                                    content=message_content, ephemeral=True
+                                )
+                                first_message_sent = True
+                                message_content = ""
+                            else:
+                                await interaction.followup.send(
+                                    content=message_content, ephemeral=True
+                                )
+                                message_content = ""
+
+                    if i_category == len(categories) - 1:
+                        message_content += f"\n{footer_text}"
             else:
                 # no categories defined, display their global trueskill stats
                 description = ""
                 if SHOW_TRUESKILL:
                     rank = player.rated_trueskill_mu - 3 * player.rated_trueskill_sigma
                     description = (
-                        f"Rating: **{round(rank, 1)}**"
+                        f"Rank: {round(rank, 1)},"
                         f" `{MU_LOWER_UNICODE}: {round(player.rated_trueskill_mu, 1)}`, "
                         f"`{SIGMA_LOWER_UNICODE}: {round(player.rated_trueskill_sigma, 1)}` "
                     )
@@ -465,19 +517,18 @@ class CommonCommands(BaseCog):
                     ],
                 )
                 description += code_block(table)
-                embed = Embed(
-                    title="Overall Stats",
-                    description=description,
-                    color=Colour.dark_embed(),
-                )
-                embed.set_footer(text=footer_text)
-                embeds.append(embed)
                 message_content = (
                     f"Overall Stats\n{description}\n{footer_text}"  # TODO: temp fix
                 )
             try:
-                await interaction.response.send_message(
-                    content=message_content, ephemeral=True
-                )
+                if message_content:
+                    if not first_message_sent:
+                        await interaction.response.send_message(
+                            content=message_content, ephemeral=True
+                        )
+                    else:
+                        await interaction.followup.send(
+                            content=message_content, ephemeral=True
+                        )
             except Exception:
                 _log.exception(f"Caught exception trying to send stats message")

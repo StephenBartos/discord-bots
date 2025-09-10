@@ -165,6 +165,77 @@ class Commend:
 
 @mapper_registry.mapped
 @dataclass
+class Config:
+    """
+    Stores global configuration values for the bot
+    """
+
+    __sa_dataclass_metadata_key__ = "sa"
+    __tablename__ = "config"
+
+    default_trueskill_mu: float = field(
+        default=config.DEFAULT_TRUESKILL_MU,
+        metadata={
+            "sa": Column(
+                Float,
+                nullable=False,
+                server_default=text(str(config.DEFAULT_TRUESKILL_MU)),
+            )
+        },
+    )
+    default_trueskill_sigma: float = field(
+        default=config.DEFAULT_TRUESKILL_SIGMA,
+        metadata={
+            "sa": Column(
+                Float,
+                nullable=False,
+                server_default=text(str(config.DEFAULT_TRUESKILL_SIGMA)),
+            )
+        },
+    )
+    default_trueskill_tau: float = field(
+        default=config.DEFAULT_TRUESKILL_TAU,
+        metadata={
+            "sa": Column(
+                Float,
+                nullable=False,
+                server_default=text(str(config.DEFAULT_TRUESKILL_TAU)),
+            )
+        },
+    )
+    # If enabled, the bot will use position-based trueskill for matchmaking,
+    enable_position_trueskill: bool = field(
+        default=False,
+        metadata={
+            "sa": Column(Boolean, nullable=False, server_default=expression.false()),
+        },
+    )
+    # If enabled, the bot will use map-based trueskill for matchmaking,
+    enable_map_trueskill: bool = field(
+        default=False,
+        metadata={
+            "sa": Column(Boolean, nullable=False, server_default=expression.false()),
+        },
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={"sa": Column(DateTime, index=True)},
+    )
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={"sa": Column(DateTime, index=True)},
+    )
+    id: str = field(
+        init=False,
+        default_factory=lambda: str(uuid4()),
+        metadata={"sa": Column(String, primary_key=True)},
+    )
+
+
+@mapper_registry.mapped
+@dataclass
 class CustomCommand:
     """
     A way for users to add custom text commands to the bot
@@ -513,6 +584,9 @@ class FinishedGamePlayer:
     rated_trueskill_sigma_before: float = field(
         metadata={"sa": Column(Float, nullable=False)}
     )
+    position_name: str | None = field(
+        metadata={"sa": Column(String, nullable=True)},
+    )
     id: str = field(
         init=False,
         default_factory=lambda: str(uuid4()),
@@ -534,6 +608,9 @@ class InProgressGame:
     __tablename__ = "in_progress_game"
 
     average_trueskill: float = field(metadata={"sa": Column(Float, nullable=True)})
+    map_id: str = field(
+        metadata={"sa": Column(String, ForeignKey("map.id"), index=True)},
+    )
     map_full_name: str = field(metadata={"sa": Column(String, server_default="")})
     map_short_name: str = field(
         metadata={"sa": Column(String, index=True, server_default="")}
@@ -613,6 +690,12 @@ class InProgressGamePlayer:
         },
     )
     team: int = field(metadata={"sa": Column(Integer, nullable=False, index=True)})
+    position_id: str | None = field(
+        default=None,
+        metadata={
+            "sa": Column(String, ForeignKey("position.id"), nullable=True, index=True)
+        },
+    )
     id: str = field(
         init=False,
         default_factory=lambda: str(uuid4()),
@@ -833,6 +916,9 @@ class Player:
     def __lt__(self, other: Player):
         return self.id < other.id
 
+    def __hash__(self):
+        return hash(self.id)
+
 
 @mapper_registry.mapped
 @dataclass
@@ -897,6 +983,21 @@ class PlayerCategoryTrueskill:
             )
         },
     )
+    position_id: str = field(
+        metadata={
+            "sa": Column(
+                String,
+                ForeignKey("position.id"),
+                nullable=True,
+                index=True,
+            )
+        },
+    )
+    map_id: str = field(
+        metadata={
+            "sa": Column(String, ForeignKey("map.id"), nullable=True, index=True)
+        },
+    )
     mu: float = field(metadata={"sa": Column(Float, nullable=False)})
     sigma: float = field(metadata={"sa": Column(Float, nullable=False)})
     rank: float = field(metadata={"sa": Column(Float, nullable=False)})
@@ -909,6 +1010,43 @@ class PlayerCategoryTrueskill:
         default_factory=lambda: datetime.now(timezone.utc),
         init=False,
         metadata={"sa": Column(DateTime, index=True)},
+    )
+    id: str = field(
+        init=False,
+        default_factory=lambda: str(uuid4()),
+        metadata={"sa": Column(String, primary_key=True)},
+    )
+
+
+@mapper_registry.mapped
+@dataclass
+class Position:
+    """
+    A position in a game - like offense, defense, etc.
+    """
+
+    __sa_dataclass_metadata_key__ = "sa"
+    __tablename__ = "position"
+
+    name: str = field(
+        metadata={"sa": Column(String, nullable=False, unique=True, index=True)},
+    )
+    short_name: str = field(
+        metadata={"sa": Column(String, nullable=False, unique=True, index=True)},
+    )
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={"sa": Column(DateTime, index=True)},
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={
+            "sa": Column(
+                DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+            )
+        },
     )
     id: str = field(
         init=False,
@@ -1006,6 +1144,12 @@ class Queue:
     currency_award: int = field(
         default=None, metadata={"sa": Column(Integer, nullable=True)}
     )
+    map_trueskill_enabled: bool = field(
+        default=False,
+        metadata={
+            "sa": Column(Boolean, nullable=False, server_default=expression.false())
+        },
+    )
 
     rotation = relationship("Rotation", back_populates="queues")
 
@@ -1078,6 +1222,53 @@ class QueuePlayer:
     )
     added_at: datetime = field(
         metadata={"sa": Column(DateTime, index=True, nullable=False)},
+    )
+
+
+@mapper_registry.mapped
+@dataclass
+class QueuePosition:
+    """
+    Assign positions to a queue
+    """
+
+    __sa_dataclass_metadata_key__ = "sa"
+    __tablename__ = "queue_position"
+    __table_args__ = (UniqueConstraint("queue_id", "position_id"),)
+
+    queue_id: str = field(
+        metadata={
+            "sa": Column(String, ForeignKey("queue.id"), nullable=False, index=True)
+        },
+    )
+    position_id: str = field(
+        metadata={
+            "sa": Column(String, ForeignKey("position.id"), nullable=False, index=True)
+        },
+    )
+    count: int = field(
+        metadata={
+            "sa": Column(Integer, nullable=False),
+        },
+    )
+    updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={
+            "sa": Column(
+                DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+            )
+        },
+    )
+    created_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        init=False,
+        metadata={"sa": Column(DateTime, index=True)},
+    )
+    id: str = field(
+        init=False,
+        default_factory=lambda: str(uuid4()),
+        metadata={"sa": Column(String, primary_key=True)},
     )
 
 
@@ -1257,7 +1448,9 @@ class Rotation:
 
     rotation_maps = relationship("RotationMap", cascade="all, delete-orphan")
     queues = relationship("Queue", back_populates="rotation")
-    rotation_map_history = relationship("RotationMapHistory", cascade="all, delete-orphan")
+    rotation_map_history = relationship(
+        "RotationMapHistory", cascade="all, delete-orphan"
+    )
 
 
 @mapper_registry.mapped
@@ -1305,7 +1498,9 @@ class RotationMap:
     )
     stop_rotation: bool = field(
         default=False,
-        metadata={"sa": Column(Boolean, nullable=False, server_default=expression.false())}
+        metadata={
+            "sa": Column(Boolean, nullable=False, server_default=expression.false())
+        },
     )
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -1340,7 +1535,9 @@ class RotationMap:
     )
 
     map_votes = relationship("MapVote", cascade="all, delete-orphan")
-    rotation_map_history = relationship("RotationMapHistory", cascade="all, delete-orphan")
+    rotation_map_history = relationship(
+        "RotationMapHistory", cascade="all, delete-orphan"
+    )
 
 
 @mapper_registry.mapped

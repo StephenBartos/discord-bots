@@ -11,13 +11,10 @@ from discord import (
     Client,
     Colour,
     Embed,
-    Guild,
     Interaction,
     Member,
     Message,
-    Role,
     TextChannel,
-    VoiceChannel,
     app_commands,
 )
 from discord.abc import GuildChannel
@@ -31,6 +28,7 @@ from discord_bots.checks import is_admin_app_command, is_command_channel
 from discord_bots.cogs.economy import EconomyCommands
 from discord_bots.models import (
     Category,
+    Config,
     FinishedGame,
     FinishedGamePlayer,
     InProgressGame,
@@ -39,6 +37,7 @@ from discord_bots.models import (
     Map,
     Player,
     PlayerCategoryTrueskill,
+    Position,
     Queue,
     QueueWaitlist,
     Rotation,
@@ -49,6 +48,7 @@ from discord_bots.utils import (
     create_cancelled_game_embed,
     create_finished_game_embed,
     finished_game_str,
+    get_category_trueskill,
     get_n_best_finished_game_teams,
     get_n_best_teams,
     get_n_worst_finished_game_teams,
@@ -448,26 +448,33 @@ class InProgressGameCommands(commands.Cog):
                 InProgressGamePlayer.in_progress_game_id == in_progress_game.id,
             )
         ).all()
-        player_ids: list[str] = [player.id for player in players]
         players_by_id: dict[int, Player] = {player.id: player for player in players}
-        player_category_trueskills_by_id: dict[int, PlayerCategoryTrueskill] = {}
-        if queue.category_id:
-            player_category_trueskills: list[PlayerCategoryTrueskill] = (
-                session.query(PlayerCategoryTrueskill)
-                .filter(
-                    PlayerCategoryTrueskill.player_id.in_(player_ids),
-                    PlayerCategoryTrueskill.category_id == queue.category_id,
-                )
-                .all()
-            )
-            player_category_trueskills_by_id = {
-                pct.player_id: pct for pct in player_category_trueskills
-            }
+
         in_progress_game_players = (
             session.query(InProgressGamePlayer)
             .filter(InProgressGamePlayer.in_progress_game_id == in_progress_game.id)
             .all()
         )
+
+        db_config: Config = session.query(Config).first()
+
+        player_category_trueskills: list[PlayerCategoryTrueskill] = []
+        for ipgp in in_progress_game_players:
+            pct = get_category_trueskill(
+                session,
+                db_config,
+                ipgp.player_id,
+                queue.map_trueskill_enabled,
+                queue.category_id,
+                in_progress_game.map_id,
+                ipgp.position_id,
+            )
+            player_category_trueskills.append(pct)
+
+        player_category_trueskills_by_id = {
+            pct.player_id: pct for pct in player_category_trueskills
+        }
+
         team0_rated_ratings_before = []
         team1_rated_ratings_before = []
         team0_players: list[InProgressGamePlayer] = []
@@ -563,6 +570,15 @@ class InProgressGameCommands(commands.Cog):
         ):
             for i, team_gip in enumerate(team_players):
                 player = players_by_id[team_gip.player_id]
+                if team_gip.position_id:
+                    position_name = (
+                        session.query(Position)
+                        .filter(Position.id == team_gip.position_id)
+                        .first()
+                        .short_name
+                    )
+                else:
+                    position_name = None
                 finished_game_player = FinishedGamePlayer(
                     finished_game_id=finished_game.id,
                     player_id=player.id,
@@ -571,6 +587,7 @@ class InProgressGameCommands(commands.Cog):
                     rated_trueskill_mu_before=ratings_before[i].mu,
                     rated_trueskill_sigma_before=ratings_before[i].sigma,
                     rated_trueskill_mu_after=ratings_after[i].mu,
+                    position_name=position_name,
                     rated_trueskill_sigma_after=ratings_after[i].sigma,
                 )
                 trueskill_rating = ratings_after[i]
@@ -579,23 +596,15 @@ class InProgressGameCommands(commands.Cog):
                 # stale
                 player.rated_trueskill_mu = trueskill_rating.mu
                 player.rated_trueskill_sigma = trueskill_rating.sigma
-                if player.id in player_category_trueskills_by_id:
-                    pct = player_category_trueskills_by_id[player.id]
-                    pct.mu = trueskill_rating.mu
-                    pct.sigma = trueskill_rating.sigma
-                    pct.rank = trueskill_rating.mu - 3 * trueskill_rating.sigma
-                    pct.last_game_finished_at = game_finished_at
-                else:
-                    session.add(
-                        PlayerCategoryTrueskill(
-                            player_id=player.id,
-                            category_id=queue.category_id,
-                            mu=trueskill_rating.mu,
-                            sigma=trueskill_rating.sigma,
-                            rank=trueskill_rating.mu - 3 * trueskill_rating.sigma,
-                            last_game_finished_at=game_finished_at,
-                        )
-                    )
+
+                # We assume that every player has a player_category_trueskill
+                # because get_category_trueskill is supposed to create it
+                pct = player_category_trueskills_by_id[player.id]
+                pct.mu = trueskill_rating.mu
+                pct.sigma = trueskill_rating.sigma
+                pct.rank = trueskill_rating.mu - 3 * trueskill_rating.sigma
+                pct.last_game_finished_at = game_finished_at
+                session.add(pct)
                 session.add(finished_game_player)
 
         update_ratings(
